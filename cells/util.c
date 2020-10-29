@@ -155,6 +155,52 @@ int rmtree(const char *path)
 	return rmtree_real(path, 128);
 }
 
+int walkdir_through(void *ctx, const char *base, const char *sdir, int depth,const char *through,
+		void (*callback)(void *ctx, const char *path, const char *subpath, struct dirent *e))
+{
+	int ret;
+	DIR *dir;
+	struct dirent entry;
+	struct dirent *result;
+	char full_name[FILENAME_MAX];
+	char path[FILENAME_MAX];
+	char subpath[FILENAME_MAX];
+
+	if (!callback)
+		return -1;
+
+	snprintf(path, FILENAME_MAX, "%s%s", base, sdir);
+	dir = opendir(path);
+	if (!dir)
+		return -1;
+
+	for (ret = readdir_r(dir, &entry, &result);
+		 ret == 0 && result != NULL;
+		 ret = readdir_r(dir, &entry, &result))
+	{
+		if (!strcmp(entry.d_name, ".") || !strcmp(entry.d_name, ".."))
+			continue;
+
+		snprintf(full_name, FILENAME_MAX, "%s/%s", path, entry.d_name);	
+		//ALOGD("walkdir_through through = %s full_name = %s.", through, full_name);
+		if(strstr(through, full_name) == NULL)
+			continue;
+		snprintf(subpath, FILENAME_MAX, "%s/%s", sdir, entry.d_name);
+		//ALOGD("walkdir_through full_name = %s subpath = %s.", full_name, subpath);
+		callback(ctx, full_name, subpath, &entry);
+
+		if (depth && entry.d_type == DT_DIR) {
+			ret = walkdir_through(ctx, base, subpath, depth-1, through, callback);
+			if (ret)
+				break;
+		}
+	}
+
+	closedir(dir);
+
+	return ret;
+}
+
 int walkdir(void *ctx, const char *base, const char *sdir, int depth,
 		void (*callback)(void *ctx, const char *path, const char *subpath, struct dirent *e))
 {
@@ -180,6 +226,7 @@ int walkdir(void *ctx, const char *base, const char *sdir, int depth,
 	{
 		if (!strcmp(entry.d_name, ".") || !strcmp(entry.d_name, ".."))
 			continue;
+
 		snprintf(full_name, FILENAME_MAX, "%s/%s", path, entry.d_name);		
 		snprintf(subpath, FILENAME_MAX, "%s/%s", sdir, entry.d_name);
 		callback(ctx, full_name, subpath, &entry);
@@ -318,9 +365,6 @@ int is_mounted(const char *path)
 	int device_len = 256, mount_len = 256, rest_len = 256;
 	int line_len = 1024;
 	char *parse_str = NULL;
-	char *extra_path = NULL;
-	int extra_path_len = 0;
-	int extra_path_mounted = 0;
 	char *device, *mount_path, *rest, *line;
 	FILE *fp;
 
@@ -427,8 +471,8 @@ int __unmount_dir(const char *root_path, char *dir)
 		err -= 1;
 	} else
 		nr += extra_path_mounted;
-	ALOGV("%s: unmounted %d directories", nr);
 
+	ALOGV("unmounted %d directories", nr);
 out:
 	fclose(fp);
 	free(extra_path);
@@ -466,7 +510,7 @@ int insert_module(const char *path, const char *params)
 		goto out_err;
 
 	if (image_stat.st_size > (off_t)(INT_MAX - 4096)) {
-		ALOGE("File '%s' too large(%lld)", path, image_stat.st_size);
+		ALOGE("File '%s' too large(%ld)", path, image_stat.st_size);
 		goto out_err;
 	}
 	image_size = (unsigned long)image_stat.st_size;

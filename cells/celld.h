@@ -42,18 +42,18 @@
 #define SOCKET_PATH "celld"
 #define PRIV_SOCKET_PATH "TODO"
 #define CELLD_LOCKFILE "/data/.celldlock"
-#define CELL_ETC_PATH "/system/etc/cells"
 #define DEFL_CELL_DIR "/data/cells"
 #define DEFL_SDCARD_ROOT "/mnt/user/cells"
-//#define DEFL_START_OPTS "-CMSWdgimptu"
-#define DEFL_START_OPTS "-CMSWdgimpwun"
+#define DEFL_START_OPTS "-MSWdgimpwun"
 
 #define CONSOLE_READY_MSG "ready"
-#define CONSOLE_READY_MSG_LEN 8 /* strlen("0 ready") + sizeof('\0') */
+#define CONSOLE_READY_MSG_LEN 8 
 #define MAX_MSG_LEN 512
 #define MAX_NAME_LEN 64
 #define MAX_ARGS 20
 #define MAX_PATH_LEN 256
+
+#define MAX_CELL_NUM 2
 
 /* Update CELL_CMD_REV if you change this enum in any way */
 enum cell_cmd {

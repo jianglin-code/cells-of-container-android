@@ -413,7 +413,7 @@ void start_args_to_config(struct cell_start_args *args,
 	 */
 }
 
-void init_cellvm_config(const char* name)
+void init_cellvm_config(char* name)
 {
 	char *config_path;
 	struct config_info config;
@@ -437,13 +437,13 @@ void init_cellvm_config(const char* name)
 	config.pid_ns = 1;
 	config.mount_ns = 1;
 	config.mnt_rootfs = 1;
-	config.mnt_tmpfs = 1;
+	config.mnt_tmpfs = 0;
 	config.newpts = 0;
 	config.newcgrp = 1;
 	config.share_dalvik_cache= 0;
-	config.sdcard_branch = 1;
-	config.wifiproxy = 1;
-	config.console = 1;
+	config.sdcard_branch = 0;
+	config.wifiproxy = 0;
+	config.console = 0;
 	config.autostart = 1;
 	config.autoswitch = 0;
 	config.newcell = 0;

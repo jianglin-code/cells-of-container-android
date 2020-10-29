@@ -6,8 +6,6 @@
 extern "C" {
 #endif
 
-#define CELL_NUM 2
-
 extern void init_cell_net();
 extern void createveth(int index);
 extern void vethtons(int pid,int index);

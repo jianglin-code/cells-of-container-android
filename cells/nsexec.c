@@ -86,7 +86,7 @@ int load_cgroup_dir(char *dest, int len)
 {
 	FILE *f = fopen("/proc/mounts", "r");
 	char buf[200];
-	char *name, *path, *fsname, *options, *p1, *p2, *s;
+	char *name, *path, *fsname, *options, *p1;
 	if (!f)
 		return 0;
 	while (fgets(buf, sizeof(buf), f)) {
@@ -176,6 +176,193 @@ int do_newcgroup(struct cell_args *args)
 	return move_to_new_cgroup(args);
 }
 
+static int rootfs_chroot_root(const char *rootfs)
+{
+	int i, ret;
+
+	ret = chdir("/");
+	if (ret < 0){
+		ALOGD("Failed chdir /.");
+		return -1;
+	}
+
+	/* We could use here MS_MOVE, but in userns this mount is locked and
+	 * can't be moved.
+	 */
+	ret = mount(rootfs, "/", NULL, MS_REC | MS_BIND, NULL);
+	if (ret < 0){
+		ALOGD("Failed to mount %s onto / as MS_REC | MS_BIND.", rootfs);
+		return -1;
+	}
+
+	ret = mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+	if (ret < 0){
+		ALOGD("Failed to remount / .");
+		return -1;
+	}
+
+	/* The following code cleans up inherited mounts which are not required
+	 * for CT.
+	 *
+	 * The mountinfo file shows not all mounts, if a few points have been
+	 * unmounted between read operations from the mountinfo. So we need to
+	 * read mountinfo a few times.
+	 *
+	 * This loop can be skipped if a container uses userns, because all
+	 * inherited mounts are locked and we should live with all this trash.
+	 */
+	for (;;) {
+		FILE *f = NULL;
+		char *line = NULL;
+		char *slider1, *slider2;
+		int progress = 0;
+		size_t len = 0;
+
+		f = fopen("./proc/self/mountinfo", "re");
+		if (!f){
+			ALOGD("Failed to open /proc/self/mountinfo .");
+			return -1;
+		}
+
+		while (getline(&line, &len, f) > 0) {
+			for (slider1 = line, i = 0; slider1 && i < 4; i++)
+				slider1 = strchr(slider1 + 1, ' ');
+
+			ALOGD("rootfs_chroot_root line %s", line);
+			if (!slider1)
+				continue;
+
+			slider2 = strchr(slider1 + 1, ' ');
+			if (!slider2)
+				continue;
+
+			*slider2 = '\0';
+			*slider1 = '.';
+
+			if (strcmp(slider1 + 1, "/") == 0)
+				continue;
+
+			if (strcmp(slider1 + 1, "/proc") == 0)
+				continue;
+
+			ALOGD("rootfs_chroot_root umount2 %s", slider1);
+			ret = umount2(slider1, MNT_DETACH);
+			if (ret == 0)
+				progress++;
+		}
+
+		if (!progress){
+			fclose(f);
+			break;
+		}
+	}
+
+	/* This also can be skipped if a container uses userns. */
+	(void)umount2("./proc", MNT_DETACH);
+
+	/* It is weird, but chdir("..") moves us in a new root */
+	ret = chdir("..");
+	if (ret < 0){
+		ALOGD("Failed to chdir(..).");
+		return -1;
+	}
+
+	ret = chroot(".");
+	if (ret < 0){
+		ALOGD("Failed to chdir(.).");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int
+pivot_root(const char *new_root, const char *put_old)
+{
+	return syscall(__NR_pivot_root, new_root, put_old);
+}
+
+static int rootfs_pivot_root(const char *rootfs)
+{
+	int oldroot = -EBADF, newroot = -EBADF;
+	int ret;
+
+	oldroot = open("/", O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+	if (oldroot < 0){
+		ALOGD("Failed to open old root directory.");
+		return -1;
+	}
+
+	newroot = open(rootfs, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+	if (newroot < 0){
+		ALOGD("Failed to open new root directory.");
+		close(oldroot);
+		return -1;
+	}
+
+	/* change into new root fs */
+	ret = fchdir(newroot);
+	if (ret < 0){
+		ALOGD("Failed to change to new rootfs %s .", rootfs);
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	/* pivot_root into our new root fs */
+	ret = pivot_root(".", ".");
+	if (ret < 0){
+		ALOGD("Failed to pivot_root().");
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	/* At this point the old-root is mounted on top of our new-root. To
+	 * unmounted it we must not be chdir'd into it, so escape back to
+	 * old-root.
+	 */
+	ret = fchdir(oldroot);
+	if (ret < 0){
+		ALOGD("Failed to enter old root directory.");
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	/* Make oldroot a depedent mount to make sure our umounts don't propagate to the
+	 * host.
+	 */
+	ret = mount("", ".", "", MS_SLAVE | MS_REC, NULL);
+	if (ret < 0){
+		ALOGD("Failed to recursively turn old root mount tree into dependent mount.");
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	ret = umount2(".", MNT_DETACH);
+	if (ret < 0){
+		ALOGD("Failed to detach old root directory.");
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	ret = fchdir(newroot);
+	if (ret < 0){
+		ALOGD("Failed to re-enter new root directory.");
+		close(oldroot);
+		close(newroot);
+		return -1;
+	}
+
+	close(oldroot);
+	close(newroot);
+	ALOGD("pivot_root(%s) successful", rootfs);
+	return 0;
+}
+
 static int do_child(void *vargv)
 {
 	struct cell_args *cell_args = (struct cell_args *)vargv;
@@ -202,7 +389,6 @@ static int do_child(void *vargv)
 		ALOGE("/proc/drv_ns/ns_tag nsfd = %d errno = %s",nsfd,strerror(errno));
 	}
 	errno = 0;
-
 
 	ALOGD("Starting cell:");
 	ALOGD("==============");
@@ -250,13 +436,8 @@ static int do_child(void *vargv)
 	ALOGI("%s: do_child, mnt_rootfs:%d, rootdir=%s",
 		  cellname, start_args->mnt_rootfs, rootdir);
 
-	/* chroot... */
-	if (chroot(rootdir)) {
+	if(rootfs_chroot_root(rootdir) != 0){
 		syserr = "chroot";
-		goto out_err;
-	}
-	if (chdir("/")) {
-		syserr = "chdir /";
 		goto out_err;
 	}
 
@@ -267,43 +448,6 @@ static int do_child(void *vargv)
 	if (ret == -1 || atoi(buf) < 1) {
 		syserr = "cgroup entry";
 		goto out_err;
-	}
-
-	/* check if we should remount devpts */
-	if (start_args->newpts) {
-		struct stat ptystat, ptsstat;
-		argv++;
-		ALOGD("%s: mounting /dev/pts", cellname);
-		if (lstat("/dev/ptmx", &ptystat) < 0) {
-			if (symlink("/dev/pts/ptmx", "/dev/ptmx") < 0) {
-				syserr = "symlink /dev/pts/ptmx /dev/ptmx";
-				goto out_err;
-			}
-			chmod("/dev/ptmx", 0666);
-		} else if ((ptystat.st_mode & S_IFMT) != S_IFLNK) {
-			syserr = "Error: /dev/ptmx must be a link to "
-				 "/dev/pts/ptmx\n"
-				 "do:\tchmod 666 /dev/pts/ptmx\n   "
-				 "\trm /dev/ptmx\n   "
-				 "\tln -s /dev/pts/ptmx /dev/ptmx\n";
-			goto out_err;
-		}
-
-		/* create /dev/pts directory if doesn't exist */
-		if (stat("/dev/pts", &ptsstat) < 0) {
-			if (mkdir("/dev/pts", 0666) < 0) {
-				syserr = "mkdir /dev/pts";
-				goto out_err;
-			}
-		} else {
-			/* if container had no /dev/pts mounted don't fret */
-			umount2("/dev/pts", MNT_DETACH);
-		}
-
-		if (mount("pts", "/dev/pts", "devpts", 0, "ptmxmode=666,newinstance") < 0) {
-			syserr = "mount -t devpts -o newinstance";
-			goto out_err;
-		}
 	}
 
 	close(cell_args->child_pipe[0]);
@@ -323,7 +467,6 @@ static int do_child(void *vargv)
 
 	int fdcell = open("/.cell",O_WRONLY|O_CREAT,0660);
 	if(fdcell >= 0){
-
 		char value[PROPERTY_VALUE_MAX];
 		property_get("persist.sys.exit", value, "1");
 		if (strcmp(value, "0") == 0) {
@@ -331,7 +474,6 @@ static int do_child(void *vargv)
 		}else{
 			write(fdcell, "0", strlen("0"));
 		}
-
 		close(fdcell);
 		fdcell = 0;
 	}
@@ -420,10 +562,6 @@ static int do_clone(struct cell_args *cell_args)
 	void *childstack, *stack = malloc(stacksize);
 	unsigned long flags;
 	char buf[20];
-	char veth_name[256];
-	int cells_idx = 0;
-	char *syserr;
-	int e;
 
 	if (!stack) {
 		ALOGE("cannot allocate stack: %s", strerror(errno));
@@ -504,7 +642,6 @@ int cell_nsexec(int sd, struct cell_args *cell_args,
 	int pid = -1;
 	char *rootdir = cell_args->rootdir;
 	struct sigaction actions;
-	int ret;
 
 	/* Setup signal handler for SIGUSR2 (fake pthread_cancel) */
 	memset(&actions, 0, sizeof(actions));
@@ -517,7 +654,7 @@ int cell_nsexec(int sd, struct cell_args *cell_args,
 	/* pipe to synchronize child execution and entry into new cgroup */
 	if (pipe(g_cgroup_pipe)) {
 		ALOGE("pipe: %s", strerror(errno));
-		send_msg(sd, "1 nsexec failed: pipe() failed");
+		send_msg(sd, "nsexec failed: pipe() failed");
 		goto err_cleanup;
 	}
 
@@ -525,14 +662,14 @@ int cell_nsexec(int sd, struct cell_args *cell_args,
 	if (pipe(cell_args->child_pipe) || pipe(cell_args->init_pipe)) {
 		ALOGE("Can't create child/init pipes for '%s': %s",
 			  name, strerror(errno));
-		send_msg(sd, "1 nsexec failed: child/init pipe creating failed");
+		send_msg(sd, "nsexec failed: child/init pipe creating failed");
 		goto err_cleanup;
 	}
 
 	if (args->mnt_rootfs) {
 		if (mount_cell(name, args->sdcard_branch)) {
 			ALOGE("couldn't mount '%s' rootfs: %d", name, errno);
-			send_msg(sd, "1 nsexec failed: mount() rootfs failed");
+			send_msg(sd, "nsexec failed: mount() rootfs failed");
 			goto err_cleanup;
 		}
 	}

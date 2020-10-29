@@ -374,8 +374,7 @@ static void rename_cells_file(const char *dir)
 
 void copyfs_callback(void *ctx, const char *path, const char *subpath, struct dirent *e)
 {
-	const char ** ex;
-	struct stat st, cell_st;
+	struct stat st;
 	int use_stat;
 	char newpath[PATH_MAX];
 	char linkpath[PATH_MAX];
@@ -393,15 +392,18 @@ void copyfs_callback(void *ctx, const char *path, const char *subpath, struct di
 		mkdir(newpath, 0755);
 		break;
 	case DT_REG:
-		snprintf(linkpath, PATH_MAX, CELL_ETC_PATH "/%s", path);
+		/*snprintf(linkpath, PATH_MAX, CELL_ETC_PATH "/%s", path);
 		if (stat(linkpath, &cell_st) == 0)
-			path = linkpath;
+			path = linkpath;*/
 		copy_file(path, newpath);
 		break;
 	case DT_LNK:
 		memset(linkpath, 0, PATH_MAX);
+		//memset(newlinkpath, 0, PATH_MAX);
 		if (readlink(path, linkpath, PATH_MAX) < 0)
 			break;
+
+		//snprintf(newlinkpath, PATH_MAX, "%s%s", root_path, linkpath);
 		symlink(linkpath, newpath);
 		break;
 	default:
@@ -416,8 +418,10 @@ void copyfs_callback(void *ctx, const char *path, const char *subpath, struct di
 
 static int mount_rootfs(const char *root_path)
 {
-	int ret = 0, fd;
-	char pathbuf[PATH_MAX];
+	int ret = 0;
+	char dev_adb_dir_name[PATH_MAX];
+	char dev_mtp_dir_name[PATH_MAX];
+	char dev_ptp_dir_name[PATH_MAX];
 
 	if (!dir_exists(root_path)) {
 		errno = ENOENT;
@@ -432,16 +436,66 @@ static int mount_rootfs(const char *root_path)
 
 	ret   = walkdir((void *)root_path, "/", "/", 0, copyfs_callback);
 	ret += walkdir((void *)root_path, "/", "/sbin", 100, copyfs_callback);
-	ret += walkdir((void *)root_path, "/", "/root", 100, copyfs_callback);
+	//ret += walkdir((void *)root_path, "/", "/root", 100, copyfs_callback);
 	ret += walkdir((void *)root_path, "/", "/cells", 100, copyfs_callback);
+	ret += walkdir_through((void *)root_path, "/", "/mnt", 1, "//mnt/vendor/persist", copyfs_callback);
 	if (ret) {
 		ALOGE("walkdir copy fail! umount...");
-		umount(root_path);
-		return ret;
+	//	umount(root_path);
+	//	return ret;
+	}
+
+	if(is_mounted("/dev/usb-ffs/adb")){
+		sprintf(dev_adb_dir_name, "%s/adb", root_path);
+		mkdir(dev_adb_dir_name, 0777);
+		chown(dev_adb_dir_name, 2000, 2000);
+	}
+
+	if(is_mounted("/dev/usb-ffs/mtp")){
+		sprintf(dev_mtp_dir_name, "%s/mtp", root_path);
+		mkdir(dev_mtp_dir_name, 0777);
+		chown(dev_mtp_dir_name, 2000, 2000);
+	}
+
+	if(is_mounted("/dev/usb-ffs/ptp")){
+		sprintf(dev_ptp_dir_name, "%s/ptp", root_path);
+		mkdir(dev_ptp_dir_name, 0777);
+		chown(dev_ptp_dir_name, 2000, 2000);
 	}
 
 	rename_cells_file(root_path);
+
 	return 0;
+}
+
+static int mount_systemfs(const char *root_path, const char *rw_path)
+{
+	int ret, s_errno;
+	char *mount_opts = malloc(strlen(rw_path) + 64);
+	if (mount_opts == NULL)
+		return -1;
+	sprintf(mount_opts, "br:%s/system=rw:/system=ro", rw_path);
+	char *system_path = malloc(strlen(root_path)+16);
+	if (system_path == NULL) {
+		free(mount_opts);
+		return -1;
+	}
+	sprintf(system_path, "%s/system", root_path);
+
+	ret = 0;
+	if (is_mounted(system_path))
+		goto out;
+
+	ALOGD("Performing aufs mount on %s: options='%s'",
+		 system_path, mount_opts);
+	ret = mount("none", system_path, "aufs", 0, mount_opts);
+	s_errno = errno;
+out:
+	free(system_path);
+	free(mount_opts);
+	if (ret < 0)
+		errno = s_errno;
+	return ret;
 }
 
 static int mount_rw_fs(const char *root_path, const char *rw_path)
@@ -451,6 +505,12 @@ static int mount_rw_fs(const char *root_path, const char *rw_path)
 	char dev_data_host_dir_name[PATH_MAX];
 	char dev_persist_dir_name[PATH_MAX];
 	char dev_persist_host_dir_name[PATH_MAX];
+	char dev_mnt_vendor_persist_dir_name[PATH_MAX];
+	char dev_mnt_vendor_persist_host_dir_name[PATH_MAX];
+	char dev_metadata_dir_name[PATH_MAX];
+	char dev_metadata_host_dir_name[PATH_MAX];
+	//char dev_cache_dir_name[PATH_MAX];
+	//char dev_cache_host_dir_name[PATH_MAX];
 
 	errno = 0;
 	sprintf(dev_data_dir_name, "%s/data", root_path);
@@ -468,6 +528,30 @@ static int mount_rw_fs(const char *root_path, const char *rw_path)
 		ALOGD("mount %s %s = %s",dev_persist_host_dir_name , dev_persist_dir_name, strerror(errno));
 	}
 
+	errno = 0;
+	sprintf(dev_mnt_vendor_persist_dir_name, "%s/mnt/vendor/persist", root_path);
+	sprintf(dev_mnt_vendor_persist_host_dir_name, "%s/mnt/vendor/persist", rw_path);
+	if(is_mounted("/mnt/vendor/persist")){
+		ret |= mount(dev_mnt_vendor_persist_host_dir_name, dev_mnt_vendor_persist_dir_name, NULL, MS_BIND, NULL);//rw
+		ALOGD("mount %s %s = %s",dev_mnt_vendor_persist_host_dir_name , dev_mnt_vendor_persist_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_metadata_dir_name, "%s/metadata", root_path);
+	sprintf(dev_metadata_host_dir_name, "%s/metadata", rw_path);
+	if(is_mounted("/metadata")){
+		ret |= mount(dev_metadata_host_dir_name, dev_metadata_dir_name, NULL, MS_BIND, NULL);//rw
+		ALOGD("mount %s %s = %s",dev_metadata_host_dir_name , dev_metadata_dir_name, strerror(errno));
+	}
+
+	/*errno = 0;
+	sprintf(dev_cache_dir_name, "%s/cache", root_path);
+	sprintf(dev_cache_host_dir_name, "%s/cache", rw_path);
+	if(is_mounted("/cache")){
+		ret |= mount(dev_cache_host_dir_name, dev_cache_dir_name, NULL, MS_BIND, NULL);//rw
+		ALOGD("mount %s %s = %s",dev_cache_host_dir_name , dev_cache_dir_name, strerror(errno));
+	}*/
+
 	return ret;
 }
 
@@ -476,8 +560,15 @@ static int mount_ro_fs(const char *root_path)
 	int ret = 0;
 	char dev_system_dir_name[PATH_MAX];
 	char dev_vendor_dir_name[PATH_MAX];
+	char dev_vendor_dsp_dir_name[PATH_MAX];
+	char dev_vendor_bt_firmware_dir_name[PATH_MAX];
+	char dev_vendor_firmware_mnt_dir_name[PATH_MAX];
 	char dev_firmware_dir_name[PATH_MAX];
 	char dev_oem_dir_name[PATH_MAX];
+	char dev_product_dir_name[PATH_MAX];
+	char dev_adb_dir_name[PATH_MAX];
+	char dev_mtp_dir_name[PATH_MAX];
+	char dev_ptp_dir_name[PATH_MAX];
 
 	errno = 0;
 	sprintf(dev_system_dir_name, "%s/system", root_path);
@@ -489,6 +580,27 @@ static int mount_ro_fs(const char *root_path)
 	if(is_mounted("/vendor")){
 		ret |= mount("/vendor", dev_vendor_dir_name, NULL, MS_BIND, NULL);//ro
 		ALOGD("mount /vendor %s = %s", dev_vendor_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_dsp_dir_name, "%s/vendor/dsp", root_path);
+	if(is_mounted("/vendor/dsp")){
+		ret |= mount("/vendor/dsp", dev_vendor_dsp_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /vendor/dsp %s = %s", dev_vendor_dsp_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_bt_firmware_dir_name, "%s/vendor/bt_firmware", root_path);
+	if(is_mounted("/vendor/bt_firmware")){
+		ret |= mount("/vendor/bt_firmware", dev_vendor_bt_firmware_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /vendor/bt_firmware %s = %s", dev_vendor_bt_firmware_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_firmware_mnt_dir_name, "%s/vendor/firmware_mnt", root_path);
+	if(is_mounted("/vendor/firmware_mnt")){
+		ret |= mount("/vendor/firmware_mnt", dev_vendor_firmware_mnt_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /vendor/firmware_mnt %s = %s", dev_vendor_firmware_mnt_dir_name, strerror(errno));
 	}
 
 	errno = 0;
@@ -505,6 +617,34 @@ static int mount_ro_fs(const char *root_path)
 		ALOGD("mount /firmware %s = %s", dev_firmware_dir_name, strerror(errno));
 	}
 
+	errno = 0;
+	sprintf(dev_product_dir_name, "%s/product", root_path);
+	if(is_mounted("/product")){
+		ret |= mount("/product", dev_product_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /product %s = %s", dev_product_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_adb_dir_name, "%s/adb", root_path);
+	if(is_mounted("/dev/usb-ffs/adb")){
+		ret |= mount("/dev/usb-ffs/adb", dev_adb_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /dev/usb-ffs/adb %s = %s", dev_adb_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_mtp_dir_name, "%s/mtp", root_path);
+	if(is_mounted("/dev/usb-ffs/mtp")){
+		ret |= mount("/dev/usb-ffs/mtp", dev_mtp_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /dev/usb-ffs/mtp %s = %s", dev_mtp_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_ptp_dir_name, "%s/ptp", root_path);
+	if(is_mounted("/dev/usb-ffs/ptp")){
+		ret |= mount("/dev/usb-ffs/ptp", dev_ptp_dir_name, NULL, MS_BIND, NULL);//ro
+		ALOGD("mount /dev/usb-ffs/ptp %s = %s", dev_ptp_dir_name, strerror(errno));
+	}
+
 	return ret;
 }
 
@@ -512,9 +652,6 @@ static int mount_ro_fs(const char *root_path)
 int mount_cell(char *name, int sdcard_mnt)
 {
 	sdcard_mnt;
-
-	int fdcell,fdname;
-	char fdpath[PATH_MAX] = {0};
 
 	int ret = -1;
 	char *root_path = get_root_path(name);
@@ -636,7 +773,6 @@ static void usec_to_tv(struct timeval *tv, time_t usec)
 
 static int finish_cell_startup(char *name)
 {
-	int ret;
 	struct timeval stop_time;
 	time_t delta = 0;
 
@@ -658,16 +794,163 @@ static int finish_cell_startup(char *name)
 	return 0;
 }
 
+static int __umount_rootmount(const char* root_path)
+{
+	char dev_system_dir_name[PATH_MAX];
+	char dev_vendor_dir_name[PATH_MAX];
+	char dev_vendor_dsp_dir_name[PATH_MAX];
+	char dev_vendor_bt_firmware_dir_name[PATH_MAX];
+	char dev_vendor_firmware_mnt_dir_name[PATH_MAX];
+	char dev_firmware_dir_name[PATH_MAX];
+	char dev_oem_dir_name[PATH_MAX];
+	char dev_product_dir_name[PATH_MAX];
+	char dev_adb_dir_name[PATH_MAX];
+	char dev_mtp_dir_name[PATH_MAX];
+	char dev_ptp_dir_name[PATH_MAX];
+
+	char dev_data_dir_name[PATH_MAX];
+	char dev_persist_dir_name[PATH_MAX];
+	char dev_mnt_vendor_persist_dir_name[PATH_MAX];
+	char dev_metadata_dir_name[PATH_MAX];
+	char dev_cache_dir_name[PATH_MAX];
+
+	int ret = 0;
+
+	errno = 0;
+	sprintf(dev_vendor_dsp_dir_name, "%s/vendor/dsp", root_path);
+	if(is_mounted(dev_vendor_dsp_dir_name)){
+		ret |= umount(dev_vendor_dsp_dir_name);//ro
+		ALOGD("umount %s = %s", dev_vendor_dsp_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_bt_firmware_dir_name, "%s/vendor/bt_firmware", root_path);
+	if(is_mounted(dev_vendor_bt_firmware_dir_name)){
+		ret |= umount(dev_vendor_bt_firmware_dir_name);//ro
+		ALOGD("umount %s = %s", dev_vendor_bt_firmware_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_firmware_mnt_dir_name, "%s/vendor/firmware_mnt", root_path);
+	if(is_mounted(dev_vendor_firmware_mnt_dir_name)){
+		ret |= umount(dev_vendor_firmware_mnt_dir_name);//ro
+		ALOGD("umount %s = %s", dev_vendor_firmware_mnt_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_mnt_vendor_persist_dir_name, "%s/mnt/vendor/persist", root_path);
+	if(is_mounted(dev_mnt_vendor_persist_dir_name)){
+		ret |= umount(dev_mnt_vendor_persist_dir_name);//rw
+		ALOGD("umount %s = %s", dev_mnt_vendor_persist_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_persist_dir_name, "%s/persist", root_path);
+	if(is_mounted(dev_persist_dir_name)){
+		ret |= umount(dev_persist_dir_name);//rw
+		ALOGD("umount %s = %s", dev_persist_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_metadata_dir_name, "%s/metadata", root_path);
+	if(is_mounted(dev_metadata_dir_name)){
+		ret |= umount(dev_metadata_dir_name);//rw
+		ALOGD("umount %s = %s", dev_metadata_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_cache_dir_name, "%s/cache", root_path);
+	if(is_mounted(dev_cache_dir_name)){
+		ret |= umount(dev_cache_dir_name);//rw
+		ALOGD("umount %s = %s" , dev_cache_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_oem_dir_name, "%s/oem", root_path);
+	if(is_mounted(dev_oem_dir_name)){
+		ret |= umount(dev_oem_dir_name);//ro
+		ALOGD("umount %s = %s", dev_oem_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_firmware_dir_name, "%s/firmware", root_path);
+	if(is_mounted(dev_firmware_dir_name)){
+		ret |= umount(dev_firmware_dir_name);//ro
+		ALOGD("umount %s = %s", dev_firmware_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_product_dir_name, "%s/product", root_path);
+	if(is_mounted(dev_product_dir_name)){
+		ret |= umount(dev_product_dir_name);//ro
+		ALOGD("umount %s = %s", dev_product_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_ptp_dir_name, "%s/ptp", root_path);
+	if(is_mounted(dev_ptp_dir_name)){
+		ret |= umount(dev_ptp_dir_name);//ro
+		ALOGD("umount %s = %s", dev_ptp_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_mtp_dir_name, "%s/mtp", root_path);
+	if(is_mounted(dev_mtp_dir_name)){
+		ret |= umount(dev_mtp_dir_name);//ro
+		ALOGD("umount %s = %s", dev_mtp_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_adb_dir_name, "%s/adb", root_path);
+	if(is_mounted(dev_adb_dir_name)){
+		ret |= umount(dev_adb_dir_name);//ro
+		ALOGD("umount %s = %s", dev_adb_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_data_dir_name, "%s/data", root_path);
+	if(is_mounted(dev_data_dir_name)){
+		ret |= umount(dev_data_dir_name);//rw
+		ALOGD("umount %s = %s", dev_data_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_vendor_dir_name, "%s/vendor", root_path);
+	if(is_mounted(dev_vendor_dir_name)){
+		ret |= umount(dev_vendor_dir_name);//ro
+		ALOGD("umount %s = %s", dev_vendor_dir_name, strerror(errno));
+	}
+
+	errno = 0;
+	sprintf(dev_system_dir_name, "%s/system", root_path);
+	ret |= umount(dev_system_dir_name);//ro
+	ALOGD("umount  %s = %s", dev_system_dir_name, strerror(errno));
+
+	errno = 0;
+	if(is_mounted(root_path)){
+		ret |= umount(root_path);//rootfs
+		ALOGD("umount %s = %s" , root_path, strerror(errno));
+	}
+
+	errno = 0;
+	if(is_mounted("/")){
+		ret |= umount("/");//rootfs
+		ALOGD("umount %s = %s" , "/", strerror(errno));
+	}
+
+	return ret;
+}
+
 static void *__monitor_start_state(void *arg)
 {
 	char *root_path = NULL;
-	char dev_usb_dir_name[PATH_MAX];
-	char dev_mtp_dir_name[PATH_MAX];
 	char buf[20];
-	int ret;
+	int ret, i = 0;
 
 	struct cell_monitor_state *cms = (struct cell_monitor_state *)arg;
 	root_path = get_root_path(cms->name);
+
+	set_properties_cells(cms->name,"0");
 
 	ALOGI("Waiting for '%s' to initialize...", cms->name);
 	ret = read(cms->child_fd, buf, 1);
@@ -678,26 +961,11 @@ static void *__monitor_start_state(void *arg)
 	write(cms->init_fd, buf, strlen(buf) + 1);
 	close(cms->init_fd);
 
-	snprintf(dev_usb_dir_name, PATH_MAX, "%s/dev/usb-ffs/adb", root_path);
-	snprintf(dev_mtp_dir_name, PATH_MAX, "%s/dev/usb-ffs/mtp", root_path);
+	__umount_rootmount(root_path);
 
-	while(true){
-		sleep(1);
-
-		if(access(dev_usb_dir_name, F_OK) != 0){
-			continue;
-		}
-
-		set_properties_cells(cms->name,"0");
-
-		mount("/dev/usb-ffs/adb", dev_usb_dir_name, NULL, MS_BIND, NULL);
-		mount("/dev/usb-ffs/mtp", dev_mtp_dir_name, NULL, MS_BIND, NULL);
-
-		int i = 0;
-		sscanf(cms->name, "cell%d",&i);
-		if(i > 0)starttether(i);
-		break;
-	}
+	sleep(2);
+	sscanf(cms->name, "cell%d",&i);
+	if(i > 0)starttether(i);
 
 	finish_cell_startup(cms->name);
 
@@ -822,7 +1090,7 @@ static int create_cell_dirs(const char *name, int warn)
 	 * to work around aufs quirks (two write branches, one on a vfat)
 	 */
 	static const char *rwdirs[] = {
-		"mnt","data","system","persist","firmware","vendor","oem","cells",NULL
+		"system","data","metadata","persist","cache","mnt","mnt/vendor","mnt/vendor/persist",NULL
 	};
 	const char *pdir;
 	char dpath[255];
@@ -866,25 +1134,8 @@ static int create_cell_dirs(const char *name, int warn)
 	for (i = 0, pdir=rwdirs[0]; pdir; i++, pdir = rwdirs[i]) {
 		snprintf(dpath, sizeof(dpath), "%s/%s", rw_path, pdir);
 		if (mkdir(dpath, 0755) == -1 && errno != EEXIST)
-			ALOGE("mkdir %s failed(%d): %s", dpath, errno,
-				 strerror(errno));
-		if ((i == 1) || (i == 2)) {
-			/* "mnt/media_rw" and "mnt/media_rw/sdcardv" need chown to make cell can access */
-			snprintf(dpath, sizeof(dpath), "chown media_rw:media_rw %s/%s ", rw_path, pdir);
-			system(dpath);
-		}
+			ALOGE("mkdir %s failed(%d): %s", dpath, errno, strerror(errno));
 	}
-
-	/* attempt to ensure that the bind-mounted sdcard directory will be
-	 * there when we need it - we can ignore errors from this call because
-	 * it's up to the caller whether or not to enable the bind mount in
-	 * the first place.
-	 */
-	mkdir(g_sdcard_root, 0775);
-	snprintf(dpath, sizeof(dpath), "%s/%s", g_sdcard_root, name);
-	mkdir(dpath, 0775);
-	snprintf(dpath, sizeof(dpath), "%s/%s/sdcard", g_sdcard_root, name);
-	mkdir(dpath, 0775);
 
 	free(root_path);
 	free(rw_path);
@@ -908,7 +1159,6 @@ static int unlock_send_msg(pthread_mutex_t *mtx, int fd, char *fmt, ...)
 
 	return ret;
 }
-
 
 /* Lists all created cells and their current status */
 #define CELL_STOPPED	0x01
@@ -935,7 +1185,6 @@ static void list_cells(int fd, int mask)
 	int i, n, s;
 	struct cell_node *cell;
 	char **name_list;
-	char *init_pid;
 	char msg[MAX_MSG_LEN];
 	msg[0] = '\0'; /* In case cell list is empty */
 	char *cur = msg;
@@ -1088,7 +1337,6 @@ void switch_to_next(void)
 	if (cell)
 		ALOGI("(next) Switching to '%s'", cell->name);
 	(void)__do_switch(cell);
-out:
 	pthread_mutex_unlock(&g_cell_list.mutex);
 }
 
@@ -1282,11 +1530,10 @@ static struct cell_node *__do_start(int fd, char *name,
 		send_msg(fd, "Start failed. No memory for cell argv");
 		return NULL;
 	}
+
 	cell_args.argv[0] = "/init";
 	cell_args.argv[1] = NULL;
 	cell_args.argc = 1;
-
-	//sleep(4);
 
 	/*
 	 * Start init in new namespace
@@ -1299,8 +1546,6 @@ static struct cell_node *__do_start(int fd, char *name,
 		 * will have also cleaned up after itself on an error */
 		return NULL;
 	}
-
-	ALOGE("read_config begin");
 
 	/* Try our best to update the config file. Not fatal if we fail. */
 	config_ret = read_config(name, &config);
@@ -1340,14 +1585,19 @@ static void do_start(int fd, struct cell_cmd_arg *cmd_args)
 {
 	struct cell_start_args *args = &cmd_args->start_args;
 	char *name = cmd_args->cellname;
-	int err;
-	pthread_t thread;
-
 	struct cell_node *ret;
+	int index = -1;
 
 	ALOGI("start: Start %s\n", name);
 	if (strcmp(name, "") == 0) {
 		send_msg(fd, "You must specify a cell");
+		return;
+	}
+
+	/* Make sure cell INDEX */
+	sscanf(name, "cell%d", &index);
+	if(index <= 0 || index > MAX_CELL_NUM){
+		send_msg(fd, "Start failed. Cell INDEX is 1~ %d.", MAX_CELL_NUM);
 		return;
 	}
 
@@ -1534,7 +1784,6 @@ static void do_console(int fd, struct cell_cmd_arg *args)
 {
 	char *code, *rmsg;
 	char *name = args->cellname;
-	char *msg;
 	if (strcmp(name, "") == 0) {
 		send_msg(fd,"Failed to get console. You must specify a cell");
 		return;
@@ -2220,7 +2469,6 @@ static void dump_timestamp(char *out)
 static void dump_file(char *in, char *out)
 {
 	char *msg;
-	int i;
 	int ret;
 	FILE *fd_out = fopen(out, "a");
 	if (fd_out == NULL) {
@@ -2306,7 +2554,6 @@ static void *cell_exit_handler(void *unused)
 	struct cell_node *cell;
 	struct cell_list *list;
 	char *root_path;
-	struct config_info config;
 
 	ALOGI("Handling SIGCHLD");
 	pthread_mutex_lock(&sigchld_lock);
@@ -2367,7 +2614,7 @@ static void celld_main(void)
 {
 	/* TODO: Create a privileged socket for registering/unregistering.
 	 * Create 2 threads here. one for priv, one for regular socket listen */
-	int sd, fd, ret;
+	int sd, fd;
 	struct sockaddr_un addr;
 	socklen_t addr_len;
 	pthread_t tid;
@@ -2512,6 +2759,24 @@ static void print_usage(const char *name)
 	printf("%s", usage);
 }
 
+static void init_cells_config(void)
+{
+	int i = 0;
+	char cellname[64] = {0};
+
+	property_set("persist.sys.exit", "0");
+	property_set("persist.sys.vm.name", "");
+	property_set("persist.sys.active", "");
+
+	for( i = 1 ; i <= MAX_CELL_NUM ; i++)
+	{
+		memset(cellname, 0, 64);
+		sprintf(cellname, "cell%d", i);
+		set_properties_cells(cellname, "0");
+		init_cellvm_config(cellname);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	int c;
@@ -2519,9 +2784,7 @@ int main(int argc, char **argv)
 	int reattach_cells = 0;
 	int autostart = 0;
 	int ret;
-	void *tret;
 	struct sigaction sigact;
-	pthread_t tid;
 
 	/* reset our umask */
 	umask(0000);
@@ -2599,15 +2862,7 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	property_set("persist.sys.exit", "0");
-	property_set("persist.sys.vm.name", "");
-	property_set("persist.sys.active", "");
-
-	set_properties_cells("cell1","0");
-	set_properties_cells("cell2","0");
-
-	init_cellvm_config("cell1");
-	init_cellvm_config("cell2");
+	init_cells_config();
 
 	if (reattach_cells)
 		try_reattach();

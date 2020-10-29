@@ -292,6 +292,8 @@ static void print_usage(const char *name)
 
 static int parse_help(int argc, char **argv, struct cell_cmd_arg *cmd)
 {
+	cmd;
+
 	int c;
 	static struct option opts[] = {
 		{ "help",	no_argument,		NULL, 'h' },
@@ -330,8 +332,6 @@ static int get_cellname(char *input, struct cell_cmd_arg *cmd)
 
 static int parse_cellname(int argc, char **argv, struct cell_cmd_arg *cmd)
 {
-	int ret;
-
 	if (parse_help(argc, argv, cmd) < 0)
 		return -1;
 
@@ -409,7 +409,6 @@ static int parse_create(int argc, char **argv, struct cell_cmd_arg *cmd)
 static int parse_list(int argc, char **argv, struct cell_cmd_arg *cmd)
 {
 	struct cell_list_args *args = &cmd->list_args;
-	int id = -1;
 	int c;
 	static struct option opts[] = {
 		{ "all",	no_argument,		NULL, 1 },
@@ -544,8 +543,7 @@ restart_default:
 	 * also rememebr if anything was ever set
 	 */
 	if (defaults || no) {
-	//	args->noopt = no;
-		args->noopt = 0;  //guoweibin : force use our opt, because configfile sometimes is err
+		args->noopt = 0;  
 		defaults = 0;
 		no = 0;
 		dflt_argv[2] = argv[optind + 1];
@@ -609,7 +607,6 @@ static int parse_setid(int argc, char **argv, struct cell_cmd_arg *cmd)
 static int parse_mount(int argc, char **argv, struct cell_cmd_arg *cmd)
 {
 	struct cell_mount_args *args = &cmd->mount_args;
-	int id = -1;
 	int c;
 	static struct option opts[] = {
 		{ "all",	no_argument,		NULL, 1 },
@@ -731,7 +728,7 @@ out_close:
 int main(int argc, char **argv)
 {
 	struct cell_cmd_arg cmd;
-	int ret, sd;
+	int ret;
 	unsigned int i;
 
 	if (argc < 2) {

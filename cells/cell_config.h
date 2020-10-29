@@ -67,6 +67,6 @@ void start_args_to_config(struct cell_start_args *args,
 void config_to_start_args(struct config_info *config,
 			  struct cell_start_args *args);
 
-void init_cellvm_config(const char* name);
+void init_cellvm_config(char* name);
 
 #endif

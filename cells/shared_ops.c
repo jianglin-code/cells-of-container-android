@@ -90,7 +90,7 @@ int send_msg(int fd, const char *fmt, ...)
 int recv_msg_len(int fd, char **code, char **msg, int maxlen)
 {
 	char buf[MAX_MSG_LEN+1];
-	int remain, ret, n, i;
+	int remain, ret, n;
 
 	if (maxlen > MAX_MSG_LEN)
 		return -1;
