@@ -6,3 +6,5 @@
  cellsservice --- 容器启动、切换、停止、迁移等功能基础服务
  
  switchsystem --- 启动、切换、迁移APP
+
+备注：cells-android10 仓库，有完整源码
